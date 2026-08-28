@@ -38,14 +38,10 @@ public enum StreamLister {
             // (an unreadable track still yields a typed entry, just with nil codec).
             var fd: CMFormatDescription?
             var timeRange = CMTimeRange.invalid
-            if let first = track.formatDescriptions.first {
-                fd = first
+            if let (fds, tr) = try? await track.load(.formatDescriptions, .timeRange) {
+                fd = fds.first
+                if tr.isValid { timeRange = tr }
             }
-            if track.timeRange.isValid {
-                timeRange = track.timeRange
-            }
-            // formatDescriptions / timeRange on AVAssetTrack are synchronous properties,
-            // safe to read directly on macOS.
 
             var descriptor = StreamDescriptor(
                 index: index,
@@ -62,7 +58,7 @@ public enum StreamLister {
                 descriptor.codecFourCC = fourCC
                 if track.mediaType == .video {
                     // Asynchronous load for numeric props used by streams listing.
-                    if let loaded = try? await loadVideoFacts(track) {
+                    if let loaded = await loadVideoFacts(track) {
                         descriptor.width = loaded.0
                         descriptor.height = loaded.1
                         descriptor.fpsNum = loaded.2
@@ -98,6 +94,6 @@ public enum StreamLister {
     static func trackType(_ track: AVAssetTrack) -> String {
         if track.mediaType == .video { return "video" }
         if track.mediaType == .audio { return "audio" }
-        return track.mediaType ?? "unknown"
+        return track.mediaType.rawValue
     }
 }

@@ -1,0 +1,11 @@
+# Swift Package Manager build artifacts
+.build/
+
+# Package.resolved is regenerated on resolution; for a CLI executable we don't pin it.
+Package.resolved
+
+# Generated acceptance test asset (regenerate with ffmpeg; do not commit the binary)
+.acceptance/
+
+# macOS
+.DS_Store

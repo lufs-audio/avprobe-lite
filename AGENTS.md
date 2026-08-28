@@ -36,29 +36,42 @@ before changing behavior.
 ## Known build/compile notes (from the Mac pass)
 
 - The package builds only on macOS (AVFoundation/VideoToolbox) and needs the **macOS SDK
-  15.4+** for the `VTFrameProcessor` availability block.
-- `ProcessPath.gate()` uses `#if canImport(VideoToolbox.VTFrameProcessor)` — on older SDKs
-  it compiles to the honest unsupported path. Do not "simplify" this into a hard citation
-  that breaks older SDKs.
+  15.4+** for the `VTFrameProcessor` availability block (verified on SDK 26.5).
+- `ProcessPath.gate(effect:)` uses `#if canImport(VideoToolbox.VTFrameProcessor)` — on older
+  SDKs it compiles to the honest unsupported path. Do not "simplify" this into a hard
+  citation that breaks older SDKs.
 - With Swift's default "minimal" strict-concurrency, the synchronous `AVAssetReader`
-  calls in `Frames.swift` compile fine. If someone enables
+  calls in `Frames.swift` / `FrameProcessorLive.swift` compile fine. If someone enables
   `.swiftStrictConcurrency`, reader setup must move to `@MainActor` / an executor.
-- The CLI uses `@main AsyncParsableCommand`. ArgumentParser validates syntax and calls
-  `exit(withError:)` FIRST for unknown flags (EX_USAGE 64) before our `run()`. If you want
-  malformed-syntax mapped to 2, switch to a hand-rolled `@main` + `parseAsRoot` + `exit()`.
+- **The CLI is a hand-rolled `@main`** (`AVProbeLiteMain`): it calls
+  `AVProbeLite.parseAsRoot` then maps ArgumentParser **parse errors to our usage floor (2)**
+  (ArgumentParser's native `EX_USAGE` is 64), while `--help`/`--version` still exit 0 via
+  `AVProbeLite.exit(withError:)`. Keep that mapping; a plain `@main AsyncParsableCommand`
+  would silently leak 64 as a 4th exit code.
+- The real ML effects live in `FrameProcessorLive.swift`, each keyed off a distinct config
+  class with its own OS floor. Do not merge them back into a single coarse gate.
 
-## Reconciling-agent flags (hardest-to-verify without a Mac)
+## Mac-verified API surfaces (PROVEN by the 2026-08-28 build; no longer flags)
 
-Confirmed beyond doubt by reading Apple docs, but NOT compile-checked here — flag any that
-fail the Mac `swift build`:
+The following were reconciled against the real SDK during the Mac pass and are now
+confirmed to compile and behave correctly. Treat these as settled facts:
 
-- The exact Swift signature of `VTFrameProcessor`'s effect/config API (the spec cites the
-  type; the concrete pipeline names below are ours, semantically loaded). The `process`
-  path may need its real initializer on the Mac instead of the conservative gate.
-- Whether `CMFormatDescriptionGetMediaSubType`/`GetExtension` return `FourCharCode` /
-  `CFTypeRef?` exactly as written against the current SDK.
-- `AVAssetTrack.timeRange` / `formatDescriptions` synchronous property access vs needing
-  async `load` — both are valid; the Streams path reads them directly.
-- Whether `VTIsHardwareDecodeSupported(kCMVideoCodecType_H264)` returns `Bool` (it does).
+- **VTFrameProcessor effect/config API** — `VTFrameRateConversionConfiguration` (interpolate,
+  macOS 15.4+), `VTTemporalNoiseFilterConfiguration` (denoise, macOS 26.0+, rejects 8-bit
+  4:2:0 `420f`), `VTSuperResolutionScalerConfiguration` (macOS 26.0+, **only scale factor 4**
+  on this Mac, and needs the ML model downloaded — check its `status`). `.isSupported` is a
+  live `Bool` class property per config. Use `VTFrameProcessorFrame(buffer:presentationTimeStamp:)`
+  to wrap `CVPixelBuffer`s.
+- **`CMFormatDescriptionGetMediaSubType`/`GetExtension`** — return `FourCharCode` /
+  `CFTypeRef?` as originally written. `kCMFormatDescriptionExtension_PixelFormat` does
+  **NOT** exist in this SDK → `pixelFormatString` stays honest raw FourCC only.
+- **`AVAssetTrack.timeRange` / `formatDescriptions`** — synchronous property access;
+  the Streams path reads them directly without async load.
+- **`VTIsHardwareDecodeSupported(kCMVideoCodecType_H264)`** — returns `Bool` (confirmed).
+- **Audio** — `CMAudioFormatDescriptionGetStreamBasicDescription(fd).pointee` for sample
+  rate / channels; channel layout via `CMAudioFormatDescriptionGetChannelLayout(fd, sizeOut:)`
+  (no `mNumberChannels`). `AVAsset(url:)` is deprecated → `AVURLAsset(url:)`;
+  `asset.load(.isPlayable)` returns `Bool` (not optional); media characteristic constants
+  are `.visual` / `.audible` (no `.isVideoTrack` / `.isAudioTrack`).
 
 See `MAC_HANDOFF.md` for the ordered reconciliation runbook.

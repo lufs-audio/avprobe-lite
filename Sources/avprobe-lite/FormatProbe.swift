@@ -73,7 +73,7 @@ public enum FormatProbe {
             fpsDen: fpsDen,
             sar: sar,
             dar: dar,
-            pixFmt: pixelFormatString(fd),
+            pixFmt: pixelFormatString(fourCC),
             colorPrimaries: colorPrimariesString(fd),
             bitRateBPS: nominalBits(estBitRate),
             startS: timeStart(timeRange),
@@ -103,22 +103,18 @@ public enum FormatProbe {
         }
 
         let fourCC = mediaSubTypeString(fd)
-        let layout = CMFormatDescriptionGetAudioChannelLayout(fd)
-        var channelCount = layout?.mNumberChannels ?? 0
-        let asbd = CMFormatDescriptionGetStreamBasicDescription(fd)
-        let sampleRate = asbd?.mSampleRate ?? 0
-
-        // channelCount can be 0 from the layout when the description lists only a tag;
-        // fall back to the ASBD when available, then to the AAC "unknown" sentinel of 0.
-        if channelCount == 0, let asbd {
-            channelCount = Int(asbd.mChannelsPerFrame)
-        }
+        // AudioStreamBasicDescription is the reliable channel + sample-rate source.
+        // (CoreMedia's AudioChannelLayout pointer has no numeric member in the
+        // current SDK; the ASBD's mChannelsPerFrame governs.)
+        let asbd = CMAudioFormatDescriptionGetStreamBasicDescription(fd)
+        let channelCount = asbd.map { Int($0.pointee.mChannelsPerFrame) }
+        let sampleRate = asbd.map { Double($0.pointee.mSampleRate) }
 
         return AudioStream(
             codec: codecFamily(fourCC),
             codecFourCC: fourCC,
-            channels: channelCount > 0 ? Int(channelCount) : nil,
-            sampleRate: sampleRate > 0 ? sampleRate : nil,
+            channels: (channelCount ?? 0) > 0 ? channelCount : nil,
+            sampleRate: (sampleRate ?? 0) > 0 ? sampleRate : nil,
             bitRateBPS: nominalBits(estBitRate),
             startS: timeStart(timeRange),
             endS: timeEnd(timeRange)
@@ -218,14 +214,26 @@ public enum FormatProbe {
         return f
     }
 
-    /// Pixel format from the `PixelFormat` extension key (uncompressed/ProRes only).
-    static func pixelFormatString(_ fd: CMFormatDescription) -> String? {
-        let ext = CMFormatDescriptionGetExtension(
-            fd, extensionKey: kCMFormatDescriptionExtension_PixelFormat as CFString)
-        guard let num = ext as? NSNumber else { return nil }
-        let code = num.uint32Value
-        guard code != 0 else { return nil }
-        return fourCCString(OSStatus(code))
+    /// Pixel format FourCC for RAW/uncompressed sources only.
+    ///
+    /// The modern CoreMedia SDK has no public "PixelFormat" format-description
+    /// extension key. For a compressed source the decoded pixel format is not knowable
+    /// without opening a decoder, so we never guess one. We only report a field for
+    /// uncompressed/raw codec types whose FourCC is itself a CoreVideo pixel format
+    /// (e.g. `420f`, `2vuy`, `BGRA`) — an honest read, never a fabricated one.
+    static func pixelFormatString(_ fourCC: String?) -> String? {
+        guard let f = fourCC else { return nil }
+        let u = f.uppercased()
+        // Uncompressed/raw codec types that also name a CoreVideo pixel format.
+        // Everything else (avc1, hvc1, mp4a, …) is compressed → nil (omitted).
+        let raw = [
+            "420V", "420F", "422Y", "422V", "422F", "444V", "444F",
+            "2VUY", "YV12", "NV12", "BGRA", "ARGB", "RGBA", "ABGR",
+            "Y420", "Y422", "YUVS",
+            "R10K", "R408", "V210", "V308", "V408",
+        ]
+        guard raw.contains(u) else { return nil }
+        return u
     }
 
     /// Color primaries from the `ColorPrimaries` extension key (e.g. "ITU_R_709_2").

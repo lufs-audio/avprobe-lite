@@ -6,14 +6,14 @@ Apple's own frameworks (**AVFoundation**, **Core Media**, **VideoToolbox**) — 
 existing probe wraps: **`VTFrameProcessor`** (Apple's hardware-accelerated ML video
 processing: denoise / super-resolution / frame-rate conversion).
 
-Built and verified on macOS 15.4+ / Apple-silicon. This is Daniel's first native Swift
-project, deliberately shaped as Apple's own "fastest learning path": AVAsset →
-async-property → format-description probe → `AVAssetReader` samples → `VTFrameProcessor`
-ML effects.
+Built and verified on **macOS 26.3.1, Apple-silicon (arm64), Swift 6.3.3** against the
+Xcode `MacOSX26.5.sdk`. This is Daniel's first native Swift project, deliberately shaped
+as Apple's own "fastest learning path": AVAsset → async-property → format-description
+probe → `AVAssetReader` samples → `VTFrameProcessor` ML effects.
 
-> **Status: UNVERIFIED build.** Authored without an Apple SDK present; do not report
-> "compiles-green" until `swift build` passes on an actual Mac. See
-> [MAC_HANDOFF.md](MAC_HANDOFF.md) for the ordered reconciliation runbook.
+> **Status: Mac-verified.** `swift build` is green and `swift test` passes (15 tests) on
+> this machine; `swift build` needs an Apple SDK 15.4+ for the full `VTFrameProcessor`
+> gate to be live. See [MAC_HANDOFF.md](MAC_HANDOFF.md) for the reconciliation runbook.
 
 ## What it does
 
@@ -43,8 +43,11 @@ unproducible / asset unopenable).
 {"status":"error","code":N,"message":…}
 ```
 
-**Determinism**: sorted keys, no ANSI, no wall-clock, no hostname/pid. Same file → same
-bytes, on every run of the same binary.
+**Determinism**: sorted keys, no ANSI, no wall-clock, no hostname/pid. The probe-y
+subcommands (`info`/`streams`/`frames`) and `--check` produce identical bytes for the same
+file & binary. Only `process --effect <frc|superres>` on the supported path reports a
+measured `averageFrameTimeS` — a genuine wall-clock taken by the real ML transform, so it
+varies run-to-run by design (a live benchmark, not an identity timestamp).
 
 ## JSON schema (stable, add-only)
 
@@ -61,18 +64,30 @@ stays seconds). New capabilities are new optional keys.
 
 ## The `process` differentiator — honest capability reporting
 
-`VTFrameProcessor` (macOS 15.4+ / iOS 26+, Apple-silicon) is gated behind a real
-availability + OS-version + `VTIsHardwareDecodeSupported` check. On any host where the ML
-pipeline is unavailable, `process --effect …` / `--check` emit:
+`VTFrameProcessor` is gated per effect behind a real availability + OS-version +
+`isSupported` check. Each effect maps to its **own** configuration class with **its own
+macOS floor** (hardened SDK facts, not our choosing):
+
+| `--effect` | Real pipeline | macOS floor |
+|---|---|---|
+| `frc` | `VTFrameRateConversionConfiguration` (interpolation) | 15.4+ |
+| `superres` | `VTSuperResolutionScalerConfiguration` (only scale factor 4 here) | 26.0+ |
+| `denoise` | `VTTemporalNoiseFilterConfiguration` (needs high-bit-depth 4:2:2/4:4:4 source) | 26.0+ |
+
+On a host where the ML pipeline is unavailable, or where the source can't be serviced
+(e.g. 8-bit 4:2:0 `420f` for denoise, or the super-res model not yet downloaded),
+`process --effect …` emits an honest reason and **exit 0** — a clean no-op is a success,
+**never a fabricated result**:
 
 ```json
-{"status":"success","data":{"effect":"denoise","supported":false,"os":"macOS 15.4","soc":"arm64","applied":"none","reason":"hardware H.264 decode not supported by VideoToolbox on this device; requires Apple silicon (M-series)"}}
+{"status":"success","data":{"effect":"denoise","supported":false,"os":"macOS 26.0","soc":"arm64","applied":"none","reason":"temporal noise filter does not accept source pixel format 420f (requires a high-bit-depth 4:2:2\/4:4:4 source)"}}
 ```
 
-…and **exit 0** — a clean no-op is a success, **never a fabricated result**. When support
-IS reported, the output names exactly which pipeline applied (e.g.
-`VTFrameProcessor.superResolution`) and what was measured, refusing to claim pixels it
-could not service.
+When support IS available it runs the **real** pipeline over a decoded frame and reports
+measured `before`/`after`, naming the exact configuration class that ran (e.g.
+`applied:"VTFrameRateConversionConfiguration"`, with measured `averageFrameTimeS`). A
+supported-but-undeecodable asset is a contract error (exit 5) — we refuse to fake a
+transform.
 
 ## Build & test (macOS only)
 
@@ -96,13 +111,19 @@ Sources/avprobe-lite/
   FormatProbe.swift   # CMFormatDescription reads                        (unit 02)
   Streams.swift       # per-track listing                                (unit 03)
   Frames.swift        # AVAssetReader sample PTS/DTS                     (unit 03)
-  ProcessPath.swift   # VTFrameProcessor gate + effect mapping           (unit 04)
+  ProcessPath.swift   # per-effect VTFrameProcessor gate + capability    (unit 04)
+  FrameProcessorLive.swift  # decode + run the real ML effect            (unit 04)
   Models.swift        # versioned Codable schema                         (all units)
   Envelope.swift      # bplate JSON envelope                              (unit 05)
   AppError.swift      # error taxonomy + exit codes                       (unit 05)
 Tests/avprobe-liteTests/   # schema/envelope/capability/helper assertions
 docs/specs/2026-08-28T0505Z_avf-probe/  # the interface contract this implements
 ```
+
+## Acceptance asset
+
+`.acceptance/` holds a locally regenerated sample (see [MAC_HANDOFF.md](MAC_HANDOFF.md))
+and is gitignored — never commit the generated `sample.mp4`.
 
 ## Ecosystem
 

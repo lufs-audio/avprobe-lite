@@ -8,12 +8,13 @@
 //
 
 import XCTest
+import CoreMedia
 @testable import avprobe_lite
 
 final class FormatProbeTests: XCTestCase {
 
     func testFourCCString() {
-        XCTAssertEqual(FormatProbe.fourCCString(0x6D706734), "mp4g") // sample
+        XCTAssertEqual(FormatProbe.fourCCString(0x6D706734), "mpg4") // sample
         XCTAssertEqual(FormatProbe.fourCCString(0x61766331), "avc1")
         XCTAssertEqual(FormatProbe.fourCCString(0), "") // zero → empty
     }

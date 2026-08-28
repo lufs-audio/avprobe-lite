@@ -13,22 +13,17 @@
 //   * 5 — contract (asset cannot be opened / core properties cannot be loaded, or a
 //         promised schema field is unproducible)
 //
-// Design note on exit codes: with `@main AsyncParsableCommand`, ArgumentParser's
-// generated entry catches errors escaping `run()` and exits with its OWN code (64 for
-// usage, 1 otherwise) — which would defeat the 0/2/5 floor. So we enforce the floor
-// inside each run(): every error is caught, printed as the error envelope, and the
-// process exits with exactly 2 or 5 via `exit()`. Success exits 0 naturally by returning
-// from the AsyncParsableCommand main.
+// Design note on exit codes: we hand-roll the `@main` entrypoint (rather than letting
+// `@main AsyncParsableCommand` synthesize one) so that ArgumentParser's parse-time
+// errors (unknown flags, bad subcommand, missing required args — which would otherwise
+// exit 64 / EX_USAGE before our run() ever sees them) are mapped down to OUR usage floor
+// of 2. The per-command `run()` bodies already enforce the rest of the 0/2/5 floor via
+// `Outcome.emit()` + `exit()`. `--help` / `--version` still exit 0 via ArgumentParser's
+// public `exit(withError:)` (its own exit code for CleanExit is 0).
 //
 // `--json` is accepted for interface compatibility but this build emits JSON
 // unconditionally (that is the tool's purpose). Output is deterministic: sorted keys,
 // no ANSI, no wall-clock, no hostname/pid.
-//
-// NOTE for the Mac pass: ArgumentParser validates positional/flag syntax and calls
-// `exit(withError:)` itself BEFORE run() if e.g. an unknown flag is passed. That path
-// yields ArgumentParser's EX_USAGE (64). If you want malformed syntax mapped to 2 as
-// well, replace `@main AsyncParsableCommand` with a hand-rolled `@main` calling
-// `parseAsRoot` + `exit(ErrorOut.code(...))` — see MAC_HANDOFF, reconciling-agent flags.
 //
 
 import Foundation
@@ -36,7 +31,47 @@ import Darwin
 import ArgumentParser
 import AVFoundation
 
+// Hand-rolled entrypoint: parse once, dispatch, and map ArgumentParser's parse-time
+// errors to our usage floor (2) instead of EX_USAGE (64). Help/version stay at 0.
 @main
+enum AVProbeLiteMain {
+    static func main() async {
+        do {
+            var command = try AVProbeLite.parseAsRoot(Array(CommandLine.arguments.dropFirst()))
+            if var asyncCommand = command as? AsyncParsableCommand {
+                try await asyncCommand.run()
+            } else {
+                try command.run()
+            }
+        } catch {
+            // Built-in help (`--help`) / version (`--version`) are CleanExit: exit 0.
+            if AVProbeLite.exitCode(for: error).rawValue == 0 {
+                AVProbeLite.exit(withError: error)
+            }
+            // Real parse/validation/syntax error → our usage floor 2 (not EX_USAGE 64).
+            fputs(Envelope.error(code: 2, message: parseErrorMessage(error)) + "\n", stderr)
+            Darwin.exit(2)
+        }
+    }
+
+    // Re-formats an ArgumentParser parse error into a short, deterministic human string.
+    // `String(describing:)` embeds the cause (e.g. `unknownOption(...long("bogus"))`); we
+    // strip the internal wrapper noise and keep just the failing option/argument name.
+    private static func parseErrorMessage(_ error: Error) -> String {
+        let raw = String(describing: error)
+        guard let r = raw.range(of: "parserError: ") else { return raw }
+        let p = String(raw[r.upperBound...])
+            .replacingOccurrences(of: "ArgumentParser.ParserError.", with: "")
+        let cleaned = String(p.split(separator: "(").first ?? "")
+        switch cleaned {
+        case "unknownOption": return "unknown option"
+        case "unexpectedExtraValues": return "unexpected argument"
+        case "missingValueForOption": return "missing value for option"
+        default: return cleaned
+        }
+    }
+}
+
 struct AVProbeLite: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "avprobe-lite",
@@ -49,7 +84,7 @@ struct AVProbeLite: AsyncParsableCommand {
     // No subcommand given → print help and exit with the usage floor (2).
     func run() throws {
         fputs(AVProbeLite.helpMessage(), stderr)
-        exit(2)
+        Darwin.exit(2)
     }
 
     // MARK: - info
@@ -113,7 +148,7 @@ struct AVProbeLite: AsyncParsableCommand {
         @MainActor
         func run() async throws {
             if check {
-                let capability = await ProcessPath.check()
+                let capability = await ProcessPath.check(effect: effect ?? .frc)
                 print(Envelope.success(capability))
                 return
             }

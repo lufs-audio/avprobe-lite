@@ -39,16 +39,15 @@ public struct AssetLoader {
     public static func loadSource(_ asset: AVAsset) async throws -> SourceModel {
         let duration: CMTime
         let tracks: [AVAssetTrack]
-        let playableAny: Bool?
+        let playable: Bool
 
         do {
-            (duration, tracks, playableAny) = try await asset.load(.duration, .tracks, .playable)
+            (duration, tracks, playable) = try await asset.load(.duration, .tracks, .isPlayable)
         } catch {
             throw LoadError.contract("failed to load asset core properties", cause: error)
         }
 
         let durationS = duration.seconds
-        let playable = playableAny ?? false
 
         var model = SourceModel(
             schemaVersion: Schema.version,
@@ -60,8 +59,8 @@ public struct AssetLoader {
 
         // Pull the first video and first audio tracks into the top-level model.
         // The `streams` subcommand is authoritative for the full per-track list.
-        let videoTrack = tracks.first(where: { $0.hasMediaCharacteristics(.isVideoTrack) })
-        let audioTrack = tracks.first(where: { $0.hasMediaCharacteristics(.isAudioTrack) })
+        let videoTrack = tracks.first(where: { $0.mediaType == .video })
+        let audioTrack = tracks.first(where: { $0.mediaType == .audio })
 
         if let v = videoTrack {
             model.video = try await FormatProbe.probeVideo(track: v)

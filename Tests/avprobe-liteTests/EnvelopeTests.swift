@@ -43,9 +43,10 @@ final class EnvelopeTests: XCTestCase {
     }
 
     func testEnvelopeIsSortedAndDeterministic() {
-        let a = [1, 2, 3]
-        let json1 = Envelope.success(["z": a, "a": true])
-        let json2 = Envelope.success(["z": a, "a": true])
+        // Homogeneous payload (heterogeneous literals can't infer a single Encodable).
+        let payload: [String: Int] = ["z": 1, "a": 2]
+        let json1 = Envelope.success(payload)
+        let json2 = Envelope.success(payload)
         XCTAssertEqual(json1, json2, "same input must produce identical bytes")
         // Sorted keys: "a" appears before "z".
         let ia = json1.range(of: "\"a\"")!.lowerBound

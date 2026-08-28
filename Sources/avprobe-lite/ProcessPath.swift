@@ -2,67 +2,126 @@
 // ProcessPath.swift
 // avprobe-lite
 //
-// Unit 04 — the `process` subcommand: run a frame through VTFrameProcessor (denoise /
-// super-res / frame-rate conversion), with HONEST capability reporting. This is the
-// project's differentiator — wrapping Apple's ML media-processing path that no prior
-// probe exposes.
+// Unit 04 — the `process` subcommand: run a real frame through VTFrameProcessor
+// (denoise / super-res / frame-rate conversion), with HONEST capability reporting.
+// This is the project's differentiator — wrapping Apple's ML media-processing path
+// that no prior probe exposes.
 //
 // HONESTY RULE (repeated from the spec; non-negotiable):
-//   VTFrameProcessor only exists on macOS 15.4+ / iOS 26+ and only runs on SoCs with the
-//   hardware encoder. On any other build/device we MUST report
-//   `{"supported": false, "reason": "…"}` and exit 0 — a clean no-op is a success, never
-//   a fabricated result. We NEVER claim an effect ran when it did not.
+//   * VTFrameProcessor only exists on macOS 15.4+ / iOS 26+ (base class).
+//   * Each effect has its OWN, stricter availability floor and its own runtime
+//     hardware `isSupported` signal. We never claim a pixel was transformed when
+//     the platform cannot service it.
+//   * On any other build/device we MUST report `{"supported": false, "reason": "…"}`
+//     and exit 0 — a clean no-op is a success, never a fabricated result.
+//   * When support IS available we run the REAL pipeline and report measured
+//     before/after — naming the exact configuration class that ran.
 //
-// Because this code must compile against SDKs where VTFrameProcessor is not yet declared,
-// every symbol that only exists on macOS 15.4+ is referenced from inside an
-// `#if canImport(...)` block. On older SDKs the block compiles to a fallback that reports
-// unsupported — the honest capability gate, not a type error.
-//
-// First-order gate decisions that are platform-fact (deterministic, no input needed):
-//   * does this SDK declare VTFrameProcessor?            (`availability` / canImport)
-//   * is the host OS at least 15.4?                      (`isOperatingSystemAtLeast`)
-//   * does VideoToolbox support hardware decode here?    (`VTIsHardwareDecodeSupported`)
-//
-// Together these are all we honestly know a priori. Even when they all pass, we STILL do
-// not claim a pixel was transformed on older hardware; the supported-path only asserts
-// the pipeline is available, and refuses (exit 5) if it cannot actually service a frame.
+// Reconciled against the real macOS SDK (verified on macOS 26): the semantic names
+// implied in the original handoff (.superResolution / .denoise / .frameRateConversion)
+// map to distinct configuration classes with DIFFERENT OS floors:
+//   * frc      -> VTFrameRateConversionConfiguration      (macOS 15.4+)
+//   * denoise  -> VTTemporalNoiseFilterConfiguration      (macOS 26.0+)
+//   * superres -> VTSuperResolutionScalerConfiguration    (macOS 26.0+)
+// These floors are hard SDK facts, not our choosing; they are reported honestly.
 //
 
 import Foundation
 import AVFoundation
 import VideoToolbox
+import ArgumentParser
 
 public enum ProcessPath {
 
-    public enum Effect: String, CaseIterable, Codable {
+    public enum Effect: String, CaseIterable, Codable, ExpressibleByArgument {
         case denoise
         case superres
         case frc
+
+        public init?(argument: String) {
+            self.init(rawValue: argument)
+        }
+
+        /// Human-readable OS floor this effect's REAL configuration class requires.
+        public var requiresOS: String {
+            switch self {
+            case .frc: return "macOS 15.4"
+            case .denoise, .superres: return "macOS 26.0"
+            }
+        }
+
+        /// The configuration class this effect maps to (display string).
+        public var appliedPipeline: String {
+            switch self {
+            case .denoise: return "VTTemporalNoiseFilterConfiguration"
+            case .superres: return "VTSuperResolutionScalerConfiguration"
+            case .frc: return "VTFrameRateConversionConfiguration"
+            }
+        }
     }
 
-    /// Minimum OS version that declares VTFrameProcessor.
-    public static let requiresOS = "macOS 15.4"
     /// Conservative silicon floor — Apple silicon with a media encoder.
     public static let requiresSoC = "Apple silicon (M-series)"
 
-    // MARK: - Gate
+    // MARK: - Per-effect gate
 
-    /// The checked gate. Returns (available, reasonIfNotAvailable).
-    /// Deterministic; no I/O, no asset decode.
-    public static func gate() -> (available: Bool, reason: String?) {
-        // SDK / availability probe — the outer compile-time gate.
-        var apiOK = false
-        #if canImport(VideoToolbox.VTFrameProcessor)
-            apiOK = true
-        #endif
+    /// The checked, PER-EFFECT gate. Deterministic; no I/O, no asset decode.
+    /// Returns (available, reasonIfNotAvailable).
+    public static func gate(effect: Effect) -> (available: Bool, reason: String?) {
+        // SDK / availability probe — the compile-time gate for each config class.
+        // These must be arranged so an older SDK (no VTFrameProcessor at all) still
+        // compiles to the honest-unsupported path instead of a type error.
+        let apiOK: Bool
+        switch effect {
+        case .frc:
+            #if canImport(VideoToolbox.VTFrameProcessor)
+                if #available(macOS 15.4, *) {
+                    apiOK = true
+                } else { apiOK = false }
+            #else
+                apiOK = false
+            #endif
+        case .denoise, .superres:
+            #if canImport(VideoToolbox.VTFrameProcessor)
+                if #available(macOS 26.0, *) {
+                    apiOK = true
+                } else { apiOK = false }
+            #else
+                apiOK = false
+            #endif
+        }
+
+        // Runtime hardware truth — the real `isSupported` class property.
+        let hwOK: Bool
+        if apiOK {
+            switch effect {
+            case .frc:
+                if #available(macOS 15.4, *) {
+                    hwOK = VTFrameRateConversionConfiguration.isSupported
+                } else { hwOK = false }
+            case .superres:
+                if #available(macOS 26.0, *) {
+                    hwOK = VTSuperResolutionScalerConfiguration.isSupported
+                } else { hwOK = false }
+            case .denoise:
+                if #available(macOS 26.0, *) {
+                    hwOK = VTTemporalNoiseFilterConfiguration.isSupported
+                } else { hwOK = false }
+            }
+        } else {
+            hwOK = false
+        }
 
         // OS floor probe — runtime, deterministic for a given host.
-        let osOK = ProcessInfo.processInfo.isOperatingSystemAtLeast(
-            OperatingSystemVersion(majorVersion: 15, minorVersion: 4, patchVersion: 0))
-
-        // Hardware decoder probe — the one VideoToolbox decode-feasibility signal that's
-        // stable across all our supported SDKs.
-        let hwOK = VTIsHardwareDecodeSupported(kCMVideoCodecType_H264)
+        let osOK: Bool
+        switch effect {
+        case .frc:
+            osOK = ProcessInfo.processInfo.isOperatingSystemAtLeast(
+                OperatingSystemVersion(majorVersion: 15, minorVersion: 4, patchVersion: 0))
+        case .denoise, .superres:
+            osOK = ProcessInfo.processInfo.isOperatingSystemAtLeast(
+                OperatingSystemVersion(majorVersion: 26, minorVersion: 0, patchVersion: 0))
+        }
 
         if apiOK && osOK && hwOK {
             return (true, nil)
@@ -70,8 +129,8 @@ public enum ProcessPath {
 
         var reasons: [String] = []
         if !apiOK { reasons.append("VTFrameProcessor API not present in this SDK") }
-        if !osOK { reasons.append("requires \(requiresOS)") }
-        if !hwOK { reasons.append("hardware H.264 decode not supported by VideoToolbox on this device") }
+        if !osOK { reasons.append("requires \(effect.requiresOS)") }
+        if !hwOK { reasons.append("\(effect.appliedPipeline) not supported by VideoToolbox on this device") }
         if reasons.isEmpty { reasons.append("capability check unavailable in this build") }
         return (false, reasons.joined(separator: "; "))
     }
@@ -88,14 +147,14 @@ public enum ProcessPath {
 
     // MARK: - Entry: `--check`
 
-    /// Capability-only; reports what effects this device could run WITHOUT opening or
-    /// decoding an asset. Supports exit 0 on the honest-unsupported path.
-    public static func check() async -> EffectCapability {
-        let (available, reason) = gate()
+    /// Capability-only; reports what this effect could run on this device WITHOUT
+    /// opening or decoding an asset. Supports exit 0 on the honest-unsupported path.
+    public static func check(effect: Effect) async -> EffectCapability {
+        let (available, reason) = gate(effect: effect)
         return EffectCapability(
-            effect: "check",
+            effect: effect.rawValue,
             supported: available,
-            os: requiresOS,
+            os: effect.requiresOS,
             soc: hardwareSoCName() ?? "unknown",
             applied: available ? "capability present (no asset decoded)" : "none",
             reason: reason,
@@ -104,21 +163,22 @@ public enum ProcessPath {
         )
     }
 
-    // MARK: - Entry: `process --effect …
+    // MARK: - Entry: `process --effect …`
 
-    /// Run the requested effect over a representative frame of the asset where supported.
+    /// Run the requested effect live over a real frame of the asset where supported.
     /// - On the honest-unsupported path: returns `EffectCapability(supported:false)` (exit 0).
-    /// - On the supported-but-unreadable path: throws a contract error (exit 5); we refuse
-    ///   to fabricate a result.
+    /// - On the supported-but-unserviceable path: returns honest `supported:false` with a
+    ///   reason (exit 0) OR throws a contract error (exit 5) when the source cannot be
+    ///   decoded at all — we refuse to fabricate a result.
     public static func run(asset: AVAsset, effect: Effect) async throws -> EffectCapability {
-        let (available, reason) = gate()
         let soc = hardwareSoCName() ?? "unknown"
+        let (available, reason) = gate(effect: effect)
 
         guard available else {
             return EffectCapability(
                 effect: effect.rawValue,
                 supported: false,
-                os: requiresOS,
+                os: effect.requiresOS,
                 soc: soc,
                 applied: "none",
                 reason: reason ?? "unsupported path reached",
@@ -127,57 +187,41 @@ public enum ProcessPath {
             )
         }
 
-        // Supported path: read source stats for before/after.
-        let source = try await AssetLoader.loadSource(asset)
-        let capability = applyEffectMapping(source, effect: effect)
-        var result = capability
-        result.soc = soc
-        return result
-    }
-
-    // MARK: - Before/after
-
-    /// Build the before/after EffectStep pair from raw source stats. Only claims what we
-    /// can measure + name: frame count, native resolution, and which pipeline is applied.
-    static func applyEffectMapping(_ source: SourceModel, effect: Effect) -> EffectCapability {
-        let video = source.video
-        let before = EffectStep(
-            frameCount: 1,
-            width: video?.width,
-            height: video?.height,
-            averageFrameTimeS: nil
-        )
-        let after = EffectStep(
-            frameCount: 1,
-            width: effect == .superres ? doubleStep(video?.width) : video?.width,
-            height: effect == .superres ? doubleStep(video?.height) : video?.height,
-            averageFrameTimeS: nil
-        )
-
-        return EffectCapability(
-            effect: effect.rawValue,
-            supported: true,
-            os: requiresOS,
-            soc: nil, // filled by caller (host probe)
-            applied: appliedPipeline(effect),
-            reason: (before.width == nil || after.width == nil)
-                ? "frame resolution not conclusively read; reporting measurable stats only"
-                : nil,
-            before: before,
-            after: after
-        )
-    }
-
-    static func doubleStep(_ v: Int?) -> Int? {
-        guard let v else { return nil }
-        return v * 2
-    }
-
-    static func appliedPipeline(_ effect: Effect) -> String {
+        // Supported path: run the REAL live pipeline (frames decoded + transformed).
         switch effect {
-        case .denoise: return "VTFrameProcessor.denoise"
-        case .superres: return "VTFrameProcessor.superResolution"
-        case .frc: return "VTFrameProcessor.frameRateConversion"
+        case .frc:
+            if #available(macOS 15.4, *) {
+                var cap = try await FrameProcessorLive.frameRateConversion(asset)
+                cap.soc = soc
+                return cap
+            } else {
+                return EffectCapability(
+                    effect: effect.rawValue, supported: false, os: effect.requiresOS,
+                    soc: soc, applied: "none",
+                    reason: "requires \(effect.requiresOS)", before: nil, after: nil)
+            }
+        case .superres:
+            if #available(macOS 26.0, *) {
+                var cap = try await FrameProcessorLive.superResolution(asset)
+                cap.soc = soc
+                return cap
+            } else {
+                return EffectCapability(
+                    effect: effect.rawValue, supported: false, os: effect.requiresOS,
+                    soc: soc, applied: "none",
+                    reason: "requires \(effect.requiresOS)", before: nil, after: nil)
+            }
+        case .denoise:
+            if #available(macOS 26.0, *) {
+                var cap = try await FrameProcessorLive.temporalNoiseFilter(asset)
+                cap.soc = soc
+                return cap
+            } else {
+                return EffectCapability(
+                    effect: effect.rawValue, supported: false, os: effect.requiresOS,
+                    soc: soc, applied: "none",
+                    reason: "requires \(effect.requiresOS)", before: nil, after: nil)
+            }
         }
     }
 }

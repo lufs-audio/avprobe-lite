@@ -14,24 +14,15 @@
 import Foundation
 
 public enum Envelope {
-    public static func success<T: Encodable>(_ data: T) -> String {
-        struct StdOut<T: Encodable>: Encodable {
-            let status = "success"
-            var data: T
-        }
-        return Self.json(StdOut(data: data))
+    public static func success<Payload: Encodable>(_ data: Payload) -> String {
+        return Self.json(StdOutEnvelope(data: data))
     }
 
     public static func error(code: Int32, message: String) -> String {
-        struct Err: Encodable {
-            let status = "error"
-            var code: Int
-            var message: String
-        }
-        return Self.json(Err(code: Int(code), message: message))
+        return Self.json(ErrEnvelope(code: Int(code), message: message))
     }
 
-    static func json<T: Encodable>(_ value: T) -> String {
+    static func json<Payload: Encodable>(_ value: Payload) -> String {
         let encoder = JSONEncoder()
         // Sorted keys → the same logical object always serializes to the same
         // byte order. Doubles use Swift's default shortest round-trip form,
@@ -45,4 +36,17 @@ public enum Envelope {
             return #"{"status":"error","code":5,"message":"encoding failure"}"#
         }
     }
+}
+
+/// Success envelope transport: `{"status":"success","data":…}`.
+private struct StdOutEnvelope<Payload: Encodable>: Encodable {
+    let status = "success"
+    var data: Payload
+}
+
+/// Error envelope transport: `{"status":"error","code":N,"message":…}`.
+private struct ErrEnvelope: Encodable {
+    let status = "error"
+    var code: Int
+    var message: String
 }

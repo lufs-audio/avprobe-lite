@@ -1,7 +1,10 @@
 # MAC_HANDOFF — ordered reconciliation runbook for a local agent on a MacBook (pi)
 
-> ## UNVERIFIED: authored without an Apple SDK present; do not report compiles-green until
-> `swift build` passes on macOS.
+> ## STATUS: COMPLETE (2026-08-28, on `pi`, macOS 26.3.1 / arm64 / Swift 6.3.3 / SDK 26.5).
+> `swift build` green, `swift test` green (15 tests), acceptance pass done on a real video,
+> docs reconciled, README banner flipped. This runbook is now a record; the reconciliation
+> details and verified API surfaces live in `AGENTS.md` (see "Mac-verified API surfaces").
+> Keep the honest-unsupported + exit-floor invariants intact if anything is changed.
 
 This project was written against the documented Apple APIs from doc-only knowledge, with
 no Swift toolchain / no AVFoundation / no VideoToolbox available at authoring time. It is
