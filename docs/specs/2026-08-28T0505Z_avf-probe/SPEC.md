@@ -53,8 +53,8 @@ else has, on the very ML-media seam the JD asks about."
 ## Non-goals
 
 - Not a decoder to disk or a player. This *probes*; it does not transcode or render.
-- Not cross-platform. macOS-native by design (that's the point — the JD's Apple-platform
-  gap).
+- Not cross-platform. macOS-native by design (that's the point — demonstrate the
+  Apple-platform stack natively).
 - Not a reimplementation of ffprobe's full grammar. We expose what AVFoundation/Core Media/
   VideoToolbox natively provide; container-level gaps (e.g. MKV) are out of scope.
 - Not yet certified (Workchain tier). This phase targets "working, honest, tested."
